@@ -2,21 +2,13 @@ import re
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 
-@register("gakumas_hif", "学园偶像大师 H.I.F 算分器", "一键计算学マス H.I.F 剧本的最终预估评价分数", "1.0.0")
+@register("gakumas_hif", "学园偶像大师 H.I.F 算分器", "精准计算 H.I.F 剧本得分并反推两轮考试目标", "1.0.0")
 class GakumasHifPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
     
-    # HIF 算分核心公式
-    def calc_score(self, vo, da, vi, star, r1, r2):
-        # 1. 属性和星性基础分 (H.I.F 剧本属性系数 2.0，星性系数 7.5)
-        stats_pt = int((vo + da + vi) * 2.0)
-        star_pt = int(star * 7.5)
-        
-        # 2. 计算有效得分 X (Round 1 享受 1.2 倍加成)
-        x = int(r1 * 1.2) + r2
-        
-        # 3. 考试得分六段分段衰减
+    # 核心：根据【有效得分 X】计算考试折算分的函数
+    def _calc_exam_pt(self, x):
         exam_pt = 0
         intervals = [
             (0, 300000, 0),
@@ -26,58 +18,124 @@ class GakumasHifPlugin(Star):
             (1600000, 2200000, 0.001),
             (2200000, float('inf'), 0.0005)
         ]
-        
         for start, end, alpha in intervals:
             if x > start:
                 current_chunk = min(x, end) - start
                 exam_pt += int(current_chunk * alpha)
             else:
                 break
-                
-        total = stats_pt + star_pt + exam_pt
-        return total, stats_pt, star_pt, x
+        return exam_pt
 
-    # 监听聊天指令 /hif 
+    # 核心：已知目标考试折算分，反推需要的【有效得分 X】
+    def _reverse_exam_pt_to_x(self, target_exam_pt):
+        if target_exam_pt <= 0:
+            return 300000
+        
+        # 各分段节点的累计最大分数
+        pt_300k = 0
+        pt_600k = pt_300k + int((600000 - 300000) * 0.010)  # 3000
+        pt_1100k = pt_600k + int((1100000 - 600000) * 0.005) # 5500
+        pt_1600k = pt_1100k + int((1600000 - 1100000) * 0.002) # 6500
+        pt_2200k = pt_1600k + int((2200000 - 1600000) * 0.001) # 7100
+
+        if target_exam_pt <= pt_600k:
+            return 300000 + int(target_exam_pt / 0.010)
+        elif target_exam_pt <= pt_1100k:
+            return 600000 + int((target_exam_pt - pt_600k) / 0.005)
+        elif target_exam_pt <= pt_1600k:
+            return 1100000 + int((target_exam_pt - pt_1100k) / 0.002)
+        elif target_exam_pt <= pt_2200k:
+            return 1600000 + int((target_exam_pt - pt_1600k) / 0.001)
+        else:
+            return 2200000 + int((target_exam_pt - pt_2200k) / 0.0005)
+
     @filter.command("hif")
     async def hif_calculator(self, event: AstrMessageEvent):
         raw_text = event.message_str.strip()
-        
-        # 使用正则提取数字
         numbers = re.findall(r'\d+', raw_text)
         
-        if len(numbers) < 6:
+        if len(numbers) < 5:
             yield event.plain_result(
-                "❌ 输入格式不正确！\n\n"
-                "💡 请按照以下格式输入数字（空格隔开）：\n"
-                "/hif [Vo] [Da] [Vi] [星性] [R1分数] [R2分数]\n\n"
-                "📝 示例：\n"
-                "/hif 1500 1400 1300 210 750000 1600000"
+                "❌ 格式不对哦！请输入 5 个数字（R2选填）：\n"
+                "/hif [Vo] [Da] [Vi] [星耀值] [R1得分] [R2得分(可选)]\n\n"
+                "📝 示例（只打完一公）：/hif 842 2820 2420 1335 920000\n"
+                "📝 示例（两轮全打完）：/hif 842 2820 2420 1335 920000 1500000"
             )
             return
             
-        vo, da, vi, star, r1, r2 = map(int, numbers[:6])
+        # 解析输入
+        vo, da, vi, star, r1 = map(int, numbers[:5])
+        r2 = int(numbers[5]) if len(numbers) >= 6 else None
         
-        # 开始计算
-        total, stats_pt, star_pt, valid_exam = self.calc_score(vo, da, vi, star, r1, r2)
+        # 1. 计算基础分
+        total_stats = vo + da + vi
+        stats_pt = int(total_stats * 2.0)
+        star_pt = int(star * 7.5)
+        base_pt = stats_pt + star_pt
         
-        # 计算预估评价 Rank
-        rank = "D"
-        if total >= 33000: rank = "S5"
-        elif total >= 30000: rank = "S4+"
-        elif total >= 23000: rank = "S"
-        elif total >= 16000: rank = "A+"
-        elif total >= 13000: rank = "A"
+        # 定义 H.I.F 剧本官方评级线
+        rank_lines = {
+            "A": 13000,
+            "A+": 16000,
+            "S": 23000,
+            "S4": 30000,
+            "S4+": 33000,
+            "S5": 36000
+        }
         
+        # 2. 如果用户填了 R2，输出带有当前总分的完整报告
+        if r2 is not None:
+            valid_x = int(r1 * 1.2) + r2
+            exam_pt = self._get_plugin_dir_name_from_metadata(valid_x) if hasattr(self, '_get_plugin_dir_name_from_metadata') else self._calc_exam_pt(valid_x)
+            current_total = base_pt + exam_pt
+            
+            # 判断当前等级
+            current_rank = "D"
+            for r_name, r_score in sorted(rank_lines.items(), key=lambda item: item[1], reverse=True):
+                if current_total >= r_score:
+                    current_rank = r_name
+                    break
+                    
+            reply = (
+                f"【HIF 算分结果】\n"
+                f"三维属性：Vo={vo} Da={da} Vi={vi} (合计={total_stats})\n"
+                f"星耀值：{star} / 1335\n"
+                f"第一次得分：{r1:,}，第二次得分：{r2:,}\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"✨ 最终总评价分：{current_total} 点\n"
+                f"🏆 最终评价等级：【{current_rank}】\n"
+                f"💡 (属性分: {stats_pt} | 星耀分: {star_pt} | 考试折算: {exam_pt})"
+            )
+            yield event.plain_result(reply)
+            return
+
+        # 3. 如果用户没填 R2，进入硬核【等级表反推】模式
         reply = (
-            f"📊 【H.I.F 剧本算分结果】\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"✨ 预估最终总分：{total} 点\n"
-            f"🏆 预估评价等级：【{rank}】\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"🎵 属性总和分：{stats_pt} (面板: {vo+da+vi})\n"
-            f"🌟 星性折算分：{star_pt} (星性: {star})\n"
-            f"🎤 考试折算分：{total - stats_pt - star_pt}\n"
-            f"📈 考试有效分(R1*1.2+R2)：{valid_exam}"
+            f"【HIF 算分】\n"
+            f"三维属性：Vo={vo} Da={da} Vi={vi} (合计={total_stats})\n"
+            f"星耀值：{star} / 1335\n"
+            f"第一次得分：{r1:,}\n"
+            f"等级表反推：\n"
+            f"============\n"
         )
         
-        yield event.plain_result(reply)
+        # 遍历各个等级线进行反推
+        for rank_name, line_score in rank_lines.items():
+            needed_exam_pt = line_score - base_pt
+            
+            if needed_exam_pt <= 0:
+                reply += f"{rank_name:<5} : 已达成\n"
+            else:
+                # 反推出需要的有效总分 X
+                needed_x = self._reverse_exam_pt_to_x(needed_exam_pt)
+                # 减去第一轮的 1.2 倍加成，得到 R2 实际需要的分数
+                needed_r2 = needed_x - int(r1 * 1.2)
+                
+                if needed_r2 <= 0:
+                    reply += f"{rank_name:<5} : 0 (直接通关即可)\n"
+                elif needed_r2 > 2400000: # 超过了 HIF 剧本 R2 的分数上限
+                    reply += f"{rank_name:<5} : 无法达成\n"
+                else:
+                    reply += f"{rank_name:<5} : {needed_r2:,}\n"
+                    
+        yield event.plain_result(reply.strip())
