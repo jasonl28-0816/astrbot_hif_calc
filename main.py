@@ -2,12 +2,12 @@ import re
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 
-@register("gakumas_hif", "学园偶像大师 H.I.F 算分器", "精准计算 H.I.F 剧本得分并反推两轮考试目标", "1.0.0")
+@register("gakumas_hif", "学园偶像大师 H.I.F 算分器", "精准计算 H.I.F 剧本得分并反推两轮考试目标", "1.1.0")
 class GakumasHifPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
     
-    # 核心：根据【有效得分 X】计算考试折算分的函数
+    # 根据【有效得分 X】计算考试折算分
     def _calc_exam_pt(self, x):
         exam_pt = 0
         intervals = [
@@ -26,12 +26,11 @@ class GakumasHifPlugin(Star):
                 break
         return exam_pt
 
-    # 核心：已知目标考试折算分，反推需要的【有效得分 X】
+    # 已知目标考试折算分，反推需要的【有效得分 X】
     def _reverse_exam_pt_to_x(self, target_exam_pt):
         if target_exam_pt <= 0:
             return 300000
         
-        # 各分段节点的累计最大分数
         pt_300k = 0
         pt_600k = pt_300k + int((600000 - 300000) * 0.010)  # 3000
         pt_1100k = pt_600k + int((1100000 - 600000) * 0.005) # 5500
@@ -58,40 +57,33 @@ class GakumasHifPlugin(Star):
             yield event.plain_result(
                 "❌ 格式不对哦！请输入 5 个数字（R2选填）：\n"
                 "/hif [Vo] [Da] [Vi] [星耀值] [R1得分] [R2得分(可选)]\n\n"
-                "📝 示例（只打完一公）：/hif 842 2820 2420 1335 920000\n"
-                "📝 示例（两轮全打完）：/hif 842 2820 2420 1335 920000 1500000"
+                "📝 示例：/hif 842 2820 2420 1335 920000"
             )
             return
             
-        # 解析输入
         vo, da, vi, star, r1 = map(int, numbers[:5])
         r2 = int(numbers[5]) if len(numbers) >= 6 else None
         
-        # 1. 计算基础分
         total_stats = vo + da + vi
         stats_pt = int(total_stats * 2.0)
         star_pt = int(star * 7.5)
         base_pt = stats_pt + star_pt
         
-        # 定义 H.I.F 剧本官方评级线
-        rank_lines = {
-            "A": 13000,
-            "A+": 16000,
-            "S": 23000,
-            "S4": 30000,
-            "S4+": 33000,
-            "S5": 36000
-        }
+        # 使用你提供的新标准评级线
+        rank_lines = [
+            ("A", 10000), ("A+", 11500), ("S", 13000), ("S+", 14500),
+            ("SS", 16000), ("SS+", 18000), ("SSS", 20000), ("SSS+", 23000),
+            ("S4", 26000), ("S4+", 30000), ("S5", 35000)
+        ]
         
-        # 2. 如果用户填了 R2，输出带有当前总分的完整报告
+        # 如果两轮都打完了
         if r2 is not None:
             valid_x = int(r1 * 1.2) + r2
-            exam_pt = self._get_plugin_dir_name_from_metadata(valid_x) if hasattr(self, '_get_plugin_dir_name_from_metadata') else self._calc_exam_pt(valid_x)
+            exam_pt = self._calc_exam_pt(valid_x)
             current_total = base_pt + exam_pt
             
-            # 判断当前等级
             current_rank = "D"
-            for r_name, r_score in sorted(rank_lines.items(), key=lambda item: item[1], reverse=True):
+            for r_name, r_score in reversed(rank_lines):
                 if current_total >= r_score:
                     current_rank = r_name
                     break
@@ -109,7 +101,7 @@ class GakumasHifPlugin(Star):
             yield event.plain_result(reply)
             return
 
-        # 3. 如果用户没填 R2，进入硬核【等级表反推】模式
+        # 没填 R2，进入你要的完美【反推模式】
         reply = (
             f"【HIF 算分】\n"
             f"三维属性：Vo={vo} Da={da} Vi={vi} (合计={total_stats})\n"
@@ -119,21 +111,18 @@ class GakumasHifPlugin(Star):
             f"============\n"
         )
         
-        # 遍历各个等级线进行反推
-        for rank_name, line_score in rank_lines.items():
+        for rank_name, line_score in rank_lines:
             needed_exam_pt = line_score - base_pt
             
             if needed_exam_pt <= 0:
                 reply += f"{rank_name:<5} : 已达成\n"
             else:
-                # 反推出需要的有效总分 X
                 needed_x = self._reverse_exam_pt_to_x(needed_exam_pt)
-                # 减去第一轮的 1.2 倍加成，得到 R2 实际需要的分数
                 needed_r2 = needed_x - int(r1 * 1.2)
                 
                 if needed_r2 <= 0:
                     reply += f"{rank_name:<5} : 0 (直接通关即可)\n"
-                elif needed_r2 > 2400000: # 超过了 HIF 剧本 R2 的分数上限
+                elif needed_r2 > 2400000: # 超过 HIF 剧本 R2 单场最高上限
                     reply += f"{rank_name:<5} : 无法达成\n"
                 else:
                     reply += f"{rank_name:<5} : {needed_r2:,}\n"
