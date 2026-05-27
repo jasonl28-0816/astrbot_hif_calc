@@ -1,6 +1,9 @@
 import math
 import re
 
+from astrbot.api.event import filter, AstrMessageEvent
+from astrbot.api.star import Context, Star, register
+
 
 MAX_PARAM = 3200
 MAX_PRE_ROUND2_STAR = 1110
@@ -19,11 +22,7 @@ def clamp(value, min_value, max_value):
     return max(min_value, min(value, max_value))
 
 
-def calc_round1_rating(score: int) -> float:
-    """
-    HIF 第一次得分评级。
-    注意：HIF Round1 要先 /1.2 后向下取整。
-    """
+def calc_round1_rating(score: int) -> int:
     adjusted = math.floor(score / 1.2)
 
     if adjusted <= 300000:
@@ -41,9 +40,6 @@ def calc_round1_rating(score: int) -> float:
 
 
 def calc_round2_rating(score: int) -> int:
-    """
-    HIF 第二次得分评级。
-    """
     if score <= 600000:
         return 0
     elif score <= 900000:
@@ -59,9 +55,6 @@ def calc_round2_rating(score: int) -> int:
 
 
 def calc_round2_base_star(score: int) -> int:
-    """
-    Round2 得分产生的基础星耀值。
-    """
     if score <= 400000:
         return math.ceil(score * 0.0001875)
     elif score <= 600000:
@@ -73,32 +66,16 @@ def calc_round2_base_star(score: int) -> int:
 
 
 def calc_round2_boosted_star(score: int) -> int:
-    """
-    HIF Round2 星耀值会乘以 1.5，再向下取整。
-    满分情况下为 floor(150 * 1.5) = 225。
-    """
-    base_star = calc_round2_base_star(score)
-    return math.floor(base_star * 1.5)
+    return math.floor(calc_round2_base_star(score) * 1.5)
 
 
-def calc_total_rating(
-    vo: int,
-    da: int,
-    vi: int,
-    pre_round2_star: int,
-    round1_score: int,
-    round2_score: int,
-) -> int:
-    """
-    HIF 总评级计算。
-    """
+def calc_total_rating(vo, da, vi, pre_round2_star, round1_score, round2_score):
     vo = clamp(vo, 0, MAX_PARAM)
     da = clamp(da, 0, MAX_PARAM)
     vi = clamp(vi, 0, MAX_PARAM)
     pre_round2_star = clamp(pre_round2_star, 0, MAX_PRE_ROUND2_STAR)
 
     total_param = vo + da + vi
-
     round2_star = calc_round2_boosted_star(round2_score)
 
     param_star_rating = math.floor(
@@ -108,26 +85,10 @@ def calc_total_rating(
     round1_rating = calc_round1_rating(round1_score)
     round2_rating = calc_round2_rating(round2_score)
 
-    total_rating = param_star_rating + round1_rating + round2_rating - 2000
-
-    return total_rating
+    return param_star_rating + round1_rating + round2_rating - 2000
 
 
-def reverse_round2_score(
-    vo: int,
-    da: int,
-    vi: int,
-    pre_round2_star: int,
-    round1_score: int,
-    target_rating: int,
-):
-    """
-    反推达到目标等级所需的最低 Round2 得分。
-    因为 Round2 得分会同时影响：
-    1. Round2 评级
-    2. Round2 星耀值
-    所以这里用二分搜索最稳。
-    """
+def reverse_round2_score(vo, da, vi, pre_round2_star, round1_score, target_rating):
     current_rating = calc_total_rating(
         vo, da, vi, pre_round2_star, round1_score, 0
     )
@@ -161,7 +122,7 @@ def reverse_round2_score(
     return answer
 
 
-def hif_calc(vo: int, da: int, vi: int, pre_round2_star: int, round1_score: int) -> str:
+def hif_calc(vo, da, vi, pre_round2_star, round1_score):
     vo = clamp(vo, 0, MAX_PARAM)
     da = clamp(da, 0, MAX_PARAM)
     vi = clamp(vi, 0, MAX_PARAM)
@@ -173,23 +134,22 @@ def hif_calc(vo: int, da: int, vi: int, pre_round2_star: int, round1_score: int)
     max_round2_star = calc_round2_boosted_star(MAX_ROUND2_SCORE)
     max_total_star = pre_round2_star + max_round2_star
 
-    result_lines = []
-    result_lines.append("【HIF 算分】")
-    result_lines.append("")
-    result_lines.append(f"三维属性：Vo={vo} Da={da} Vi={vi} (合计={total_param})")
-    result_lines.append("")
-    result_lines.append(
-        f"星耀值：{pre_round2_star} / {MAX_PRE_ROUND2_STAR}，"
-        f"Round2最高可追加：{max_round2_star}，"
-        f"满额合计：{max_total_star}"
-    )
-    result_lines.append("")
-    result_lines.append(f"第一次得分：{round1_score:,}，加分：{round1_rating}")
-    result_lines.append("")
-    result_lines.append("等级表反推：")
-    result_lines.append("")
-    result_lines.append("============")
-    result_lines.append("")
+    result_lines = [
+        "【HIF 算分】",
+        "",
+        f"三维属性：Vo={vo} Da={da} Vi={vi} (合计={total_param})",
+        "",
+        f"星耀值：{pre_round2_star} / {MAX_PRE_ROUND2_STAR}",
+        f"Round2最高可追加：{max_round2_star}",
+        f"满额合计：{max_total_star}",
+        "",
+        f"第一次得分：{round1_score:,}，加分：{round1_rating}",
+        "",
+        "等级表反推：",
+        "",
+        "============",
+        "",
+    ]
 
     for rank, threshold in RANK_TABLE.items():
         required_score = reverse_round2_score(
@@ -206,20 +166,38 @@ def hif_calc(vo: int, da: int, vi: int, pre_round2_star: int, round1_score: int)
     return "\n".join(result_lines)
 
 
-def handle_hif_command(message: str):
-    """
-    指令格式：
-    算分 Vo Da Vi 当前星耀值 第一次得分
+@register(
+    "gakumas_hif",
+    "jason",
+    "学园偶像大师 HIF 算分插件",
+    "1.0.0"
+)
+class GakumasHifPlugin(Star):
+    def __init__(self, context: Context):
+        super().__init__(context)
 
-    示例：
-    算分 1267 3010 1904 1110 1028254
-    """
-    pattern = r"^算分\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)$"
-    match = re.match(pattern, message.strip())
+    @filter.command("算分")
+    async def hif_score(self, event: AstrMessageEvent):
+        message = event.message_str.strip()
+        parts = message.split()
 
-    if not match:
-        return None
+        if len(parts) != 6:
+            yield event.plain_result(
+                "格式错误：请使用\n"
+                "算分 Vo Da Vi 当前星耀值 第一次得分\n"
+                "例如：算分 1267 3010 1904 1110 1028254"
+            )
+            return
 
-    vo, da, vi, pre_round2_star, round1_score = map(int, match.groups())
+        try:
+            vo = int(parts[1])
+            da = int(parts[2])
+            vi = int(parts[3])
+            star = int(parts[4])
+            first_score = int(parts[5])
+        except ValueError:
+            yield event.plain_result("格式错误：所有参数都必须是数字。")
+            return
 
-    return hif_calc(vo, da, vi, pre_round2_star, round1_score)
+        result = hif_calc(vo, da, vi, star, first_score)
+        yield event.plain_result(result)
